@@ -1,7 +1,7 @@
 {
-  "name": "Next AI - Shopify Image Studio & SEO/GEO",
-  "description": "AI product image studio and image SEO/GEO monitoring for Shopify admin. Generate hero shots, variants, lifestyle scenes, backgrounds, and banners, audit scores, and fix alt text, filenames, variant gaps, and Product JSON-LD.",
+  "name": "Next Image Studio & SEO/GEO",
+  "description": "Product image studio and image SEO/GEO monitoring for Shopify admin. Generate hero shots, variants, lifestyle scenes, backgrounds, and banners, audit scores, and fix alt text, filenames, variant gaps, and Product JSON-LD.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }
 

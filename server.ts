@@ -1,37 +1,41 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
-import type {
-  ShopifyProduct,
-  ShopifyFile,
-  StoreAuditSummary,
-  ShopifyProductImage,
-  AuditScoreHistoryPoint,
-} from "./src/types";
+import * as shopify from "./shopify";
+import type { ShopifyProduct, StoreAuditSummary, ShopifyProductImage } from "./src/types";
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
 
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY || "";
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET || "";
+const SHOPIFY_SCOPES =
+  process.env.SCOPES || "read_products,write_products,read_files,write_files";
+const SHOPIFY_APP_URL = process.env.SHOPIFY_APP_URL || `http://localhost:${PORT}`;
+
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Server-side Gemini initialization with required telemetry header
-const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
-      },
-    },
-  });
-};
+// Allow Shopify admin to load this app in an iframe (required for an
+// embedded app — without this the browser refuses to render us inside
+// admin.shopify.com at all).
+app.use((req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    "frame-ancestors https://*.myshopify.com https://admin.shopify.com;"
+  );
+  next();
+});
+
+// Resolves the requesting shop (App Bridge ID token, falling back to the
+// cookie session) into res.locals.shop before any /api/* route runs.
+app.use("/api", async (req, res, next) => {
+  res.locals.shop = await resolveShopForRequest(req);
+  next();
+});
 
 // Initial realistic Shopify catalog state
 let products: ShopifyProduct[] = [
@@ -201,7 +205,7 @@ let products: ShopifyProduct[] = [
             severity: "critical",
             title: "Low resolution (720×720 px)",
             description: "Image is below Shopify recommended minimum zoom resolution of 1024×1024 px. Detail hover-zoom is disabled on storefront product pages.",
-            suggestedFix: "AI Upscale to 1440×1440 px HD resolution or re-upload 2048px master asset.",
+            suggestedFix: "Upscale to 1440×1440 px HD resolution or re-upload 2048px master asset.",
           },
         ],
         proposedAltText: "Apex Horizon waterproof micro-ripstop nylon weave texture and triple-welded seam swatch detail in Slate Grey",
@@ -236,7 +240,7 @@ let products: ShopifyProduct[] = [
             severity: "warning",
             title: "Aspect ratio mismatch (16:9 widescreen)",
             description: "Storefront catalog grid requires standard 1:1 square media. 16:9 ratio causes uneven card heights and white letterboxing.",
-            suggestedFix: "Re-crop to 1:1 square or re-frame with AI Studio generative fill.",
+            suggestedFix: "Re-crop to 1:1 square or re-frame with Image Studio generative fill.",
           },
         ],
         proposedAltText: "Mountaineer wearing Apex Horizon 3-layer waterproof shell jacket on misty alpine summit ridge",
@@ -739,40 +743,6 @@ let products: ShopifyProduct[] = [
   },
 ];
 
-// Shopify Store Files library
-let shopifyFiles: ShopifyFile[] = [
-  {
-    id: "file_1",
-    name: "apex-horizon-waterproof-shell-jacket-slate-grey-front.jpg",
-    url: "https://images.unsplash.com/photo-1544022613-e87ca75a784a?q=80&w=1200&auto=format&fit=crop",
-    sizeKb: 1420,
-    contentType: "image/jpeg",
-    altText: "Apex Horizon 3-layer waterproof alpine shell jacket in Slate Grey front view",
-    usedInProductsCount: 1,
-    createdAt: "2026-09-15T10:00:00Z",
-  },
-  {
-    id: "file_2",
-    name: "solstice-39mm-ceramic-automatic-watch-white-dial.jpg",
-    url: "https://images.unsplash.com/photo-1524805444758-089113d48a6d?q=80&w=1200&auto=format&fit=crop",
-    sizeKb: 1100,
-    contentType: "image/jpeg",
-    altText: "Solstice 39mm matte ceramic automatic watch with white dial",
-    usedInProductsCount: 1,
-    createdAt: "2026-09-14T08:00:00Z",
-  },
-  {
-    id: "file_3",
-    name: "lumina-architectural-led-desk-lamp-space-grey.jpg",
-    url: "https://images.unsplash.com/photo-1507473885765-e6ed057f782c?q=80&w=1200&auto=format&fit=crop",
-    sizeKb: 720,
-    contentType: "image/jpeg",
-    altText: "Lumina architectural LED task lamp in brushed space grey",
-    usedInProductsCount: 1,
-    createdAt: "2026-09-10T12:00:00Z",
-  },
-];
-
 // Helper to calculate product and store scores
 function computeProductScores(prod: ShopifyProduct) {
   if (prod.images.length === 0) {
@@ -795,7 +765,61 @@ function computeProductScores(prod: ShopifyProduct) {
   prod.overallGeoScore = Math.max(10, Math.min(100, avgGeo - Math.floor(variantPenalty / 2)));
 }
 
-function computeStoreSummary(): StoreAuditSummary {
+// Resolves which shop an /api/* request belongs to. Prefers the App Bridge
+// ID token (Authorization: Bearer ...) — the real signal for an embedded
+// load, since third-party cookies can't be relied on inside the admin
+// iframe — and lazily does token exchange + an initial catalog fetch the
+// first time a shop is seen this way. Falls back to the cookie-based
+// session (plain-browser-tab / demo testing) when there's no Bearer token.
+async function resolveShopForRequest(req: express.Request): Promise<string | null> {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("Bearer ") && SHOPIFY_API_KEY && SHOPIFY_API_SECRET) {
+    const idToken = authHeader.slice("Bearer ".length);
+    const shop = shopify.verifyIdToken(idToken, SHOPIFY_API_KEY, SHOPIFY_API_SECRET);
+    if (shop) {
+      if (!shopify.shopTokens.has(shop)) {
+        try {
+          const accessToken = await shopify.exchangeIdTokenForAccessToken(
+            shop,
+            idToken,
+            SHOPIFY_API_KEY,
+            SHOPIFY_API_SECRET
+          );
+          shopify.shopTokens.set(shop, accessToken);
+          const [fetchedProducts, info] = await Promise.all([
+            shopify.fetchShopProducts(shop, accessToken),
+            shopify.fetchShopInfo(shop, accessToken),
+          ]);
+          shopify.shopProducts.set(shop, fetchedProducts);
+          shopify.shopInfo.set(shop, info);
+        } catch (err) {
+          console.error("Token exchange failed for", shop, err);
+          shopify.shopTokens.delete(shop);
+          return null;
+        }
+      }
+      return shop;
+    }
+  }
+
+  if (SHOPIFY_API_SECRET) {
+    const cookieShop = shopify.readShopCookie(req.headers.cookie, SHOPIFY_API_SECRET);
+    if (cookieShop) return cookieShop;
+  }
+
+  return null;
+}
+
+function getProductsForRequest(req: express.Request): ShopifyProduct[] {
+  const shop = req.res?.locals.shop as string | null | undefined;
+  if (shop) {
+    const shopProds = shopify.shopProducts.get(shop);
+    if (shopProds) return shopProds;
+  }
+  return products;
+}
+
+function computeStoreSummary(productList: ShopifyProduct[]): StoreAuditSummary {
   let totalImages = 0;
   let missingAlt = 0;
   let weakFilename = 0;
@@ -805,7 +829,7 @@ function computeStoreSummary(): StoreAuditSummary {
   let seoSum = 0;
   let geoSum = 0;
 
-  for (const p of products) {
+  for (const p of productList) {
     computeProductScores(p);
     seoSum += p.overallSeoScore;
     geoSum += p.overallGeoScore;
@@ -838,63 +862,11 @@ function computeStoreSummary(): StoreAuditSummary {
     }
   }
 
-  const currentSeo = products.length ? Math.round(seoSum / products.length) : 0;
-  const currentGeo = products.length ? Math.round(geoSum / products.length) : 0;
-
-  // Generate 30-day realistic progression leading up to current live scores
-  const history: AuditScoreHistoryPoint[] = [];
-  const baseSeoStart = Math.max(38, currentSeo - 24);
-  const baseGeoStart = Math.max(32, currentGeo - 28);
-  const totalDays = 30;
-  const now = new Date("2026-09-21T00:00:00Z");
-
-  for (let i = totalDays - 1; i >= 0; i--) {
-    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-    const dateStr = d.toISOString().split("T")[0];
-    const month = d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
-    const day = d.getUTCDate();
-    const label = `${month} ${day}`;
-
-    // S-curve / stepwise progression simulating audit fixes & AI batch runs
-    const progress = 1 - i / (totalDays - 1);
-    const dayStep = totalDays - i;
-    
-    // Controlled variance with positive upward momentum
-    let seo = Math.round(baseSeoStart + (currentSeo - baseSeoStart) * Math.pow(progress, 1.25));
-    let geo = Math.round(baseGeoStart + (currentGeo - baseGeoStart) * Math.pow(progress, 1.35));
-
-    // Minor realistic day-to-day fluctuations
-    if (i > 0) {
-      const wobble = ((dayStep * 7) % 5) - 2;
-      seo = Math.min(100, Math.max(25, seo + (wobble > 0 ? 1 : wobble < -1 ? -1 : 0)));
-      geo = Math.min(100, Math.max(20, geo + (wobble > 1 ? 1 : wobble < 0 ? -1 : 0)));
-    } else {
-      // Day 0 is strictly today's current computed store score
-      seo = currentSeo;
-      geo = currentGeo;
-    }
-
-    let note: string | undefined = undefined;
-    if (dayStep === 6) note = "Initial catalog import";
-    if (dayStep === 14) note = "Bulk alt-text optimization";
-    if (dayStep === 22) note = "Shopify Files sync";
-    if (dayStep === 28) note = "GEO Schema & Hero refresh";
-
-    const resolvedIssues = Math.round(progress * 42);
-
-    history.push({
-      date: dateStr,
-      label,
-      seoScore: seo,
-      geoScore: geo,
-      totalImages,
-      resolvedIssues,
-      note,
-    });
-  }
+  const currentSeo = productList.length ? Math.round(seoSum / productList.length) : 0;
+  const currentGeo = productList.length ? Math.round(geoSum / productList.length) : 0;
 
   return {
-    totalProducts: products.length,
+    totalProducts: productList.length,
     totalImages,
     averageSeoScore: currentSeo,
     averageGeoScore: currentGeo,
@@ -904,7 +876,6 @@ function computeStoreSummary(): StoreAuditSummary {
     jsonLdIssuesCount: jsonLdIssues,
     missingTranslationsCount: missingTranslations,
     lastStoreAudit: new Date().toISOString(),
-    history,
   };
 }
 
@@ -914,16 +885,17 @@ function computeStoreSummary(): StoreAuditSummary {
 
 // 1. Store products list & store audit summary
 app.get("/api/products", (req, res) => {
-  const summary = computeStoreSummary();
+  const productList = getProductsForRequest(req);
+  const summary = computeStoreSummary(productList);
   res.json({
-    products,
+    products: productList,
     summary,
   });
 });
 
 // 2. Single product details
 app.get("/api/products/:id", (req, res) => {
-  const product = products.find((p) => p.id === req.params.id);
+  const product = getProductsForRequest(req).find((p) => p.id === req.params.id);
   if (!product) {
     res.status(404).json({ error: "Product not found" });
     return;
@@ -932,95 +904,10 @@ app.get("/api/products/:id", (req, res) => {
   res.json(product);
 });
 
-// 3. Trigger AI SEO/GEO Audit on a product using Gemini
-app.post("/api/products/:id/audit", async (req, res) => {
-  const product = products.find((p) => p.id === req.params.id);
-  if (!product) {
-    res.status(404).json({ error: "Product not found" });
-    return;
-  }
-
-  const ai = getGeminiClient();
-
-  if (ai) {
-    try {
-      const prompt = `You are an expert Shopify Image SEO and GEO (Generative Engine Optimization for ChatGPT, Perplexity, and Google AI Overviews) auditor.
-Analyze this Shopify product and its images:
-Product: ${product.title}
-Handle: ${product.handle}
-Category: ${product.productType}
-Description: ${product.description}
-Variants: ${product.variants.map((v) => `${v.title} (SKU: ${v.sku})`).join(", ")}
-Images: ${JSON.stringify(
-        product.images.map((img) => ({
-          id: img.id,
-          filename: img.filename,
-          currentAlt: img.altText,
-          isHero: img.isHero,
-        }))
-      )}
-
-For each image, provide:
-1. SEO Score (0-100) and GEO Score (0-100)
-2. Optimized descriptive alt text (12-25 words, mentioning brand, product, materials, angle, context)
-3. SEO-clean filename (hyphen-separated, lowercase, no generic tags)
-4. Multi-language alt text in Spanish (es), French (fr), German (de), Japanese (ja)
-5. Array of detected issues.
-
-Return valid JSON adhering strictly to this format:
-{
-  "images": [
-    {
-      "id": "img_id",
-      "seoScore": 92,
-      "geoScore": 88,
-      "proposedAltText": "...",
-      "proposedFilename": "...",
-      "translations": { "en": "...", "es": "...", "fr": "...", "de": "...", "ja": "..." }
-    }
-  ]
-}`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-        },
-      });
-
-      if (response.text) {
-        const parsed = JSON.parse(response.text);
-        if (Array.isArray(parsed.images)) {
-          for (const item of parsed.images) {
-            const targetImg = product.images.find((i) => i.id === item.id);
-            if (targetImg) {
-              targetImg.proposedAltText = item.proposedAltText || targetImg.proposedAltText;
-              targetImg.proposedFilename = item.proposedFilename || targetImg.proposedFilename;
-              if (item.translations) {
-                targetImg.translations = { ...targetImg.translations, ...item.translations };
-              }
-              if (typeof item.seoScore === "number") targetImg.seoScore = item.seoScore;
-              if (typeof item.geoScore === "number") targetImg.geoScore = item.geoScore;
-            }
-          }
-        }
-      }
-    } catch (err) {
-      console.warn("Gemini audit fell back to internal rule-based auditor:", err);
-    }
-  }
-
-  product.lastAuditedAt = new Date().toISOString();
-  computeProductScores(product);
-  res.json(product);
-});
-
-// 4. Apply single fix to an image
+// 3. Apply an ALT text fix to an image
 app.post("/api/products/:id/apply-fix", (req, res) => {
   const { imageId, field, value } = req.body;
-  const product = products.find((p) => p.id === req.params.id);
+  const product = getProductsForRequest(req).find((p) => p.id === req.params.id);
   if (!product) {
     res.status(404).json({ error: "Product not found" });
     return;
@@ -1033,646 +920,143 @@ app.post("/api/products/:id/apply-fix", (req, res) => {
   }
 
   if (field === "altText") {
-    img.altText = value || img.proposedAltText;
-    img.issues = img.issues.filter((iss) => iss.type !== "alt_missing" && iss.type !== "alt_weak");
-    img.seoScore = Math.min(100, img.seoScore + 18);
-    img.geoScore = Math.min(100, img.geoScore + 20);
-  } else if (field === "filename") {
-    img.filename = value || img.proposedFilename;
-    img.issues = img.issues.filter((iss) => iss.type !== "filename_generic");
-    img.seoScore = Math.min(100, img.seoScore + 12);
-    img.geoScore = Math.min(100, img.geoScore + 14);
-  } else if (field === "translations") {
-    if (value) {
-      img.translations = { ...img.translations, ...value };
-    }
-    img.issues = img.issues.filter((iss) => iss.type !== "no_translations");
-    img.seoScore = Math.min(100, img.seoScore + 8);
-    img.geoScore = Math.min(100, img.geoScore + 10);
-  } else if (field === "assignVariant") {
-    const variantId = value;
-    if (variantId && !img.variantIds.includes(variantId)) {
-      img.variantIds.push(variantId);
-      const v = product.variants.find((vr) => vr.id === variantId);
-      if (v) v.imageId = img.id;
-      img.issues = img.issues.filter((iss) => iss.type !== "variant_unassigned");
-    }
-  } else if (field === "resolution_upscale") {
-    if (value && value.width && value.height) {
-      img.width = value.width;
-      img.height = value.height;
-    } else {
-      img.width = Math.max(1600, img.width * 2);
-      img.height = Math.max(1600, img.height * 2);
-    }
-    img.issues = img.issues.filter((iss) => iss.type !== "low_res");
-    img.seoScore = Math.min(100, img.seoScore + 15);
-    img.geoScore = Math.min(100, img.geoScore + 12);
-  } else if (field === "crop_aspect_ratio") {
-    if (value && value.width && value.height) {
-      img.width = value.width;
-      img.height = value.height;
-    } else {
-      const sq = Math.min(img.width, img.height);
-      img.width = sq;
-      img.height = sq;
-    }
-    img.issues = img.issues.filter((iss) => iss.type !== "aspect_ratio_mismatch");
-    img.seoScore = Math.min(100, img.seoScore + 10);
-    img.geoScore = Math.min(100, img.geoScore + 10);
+    img.altText = value ?? "";
   }
 
-  // Synchronize JSON-LD image object
-  const jsonLdImg = product.jsonLd.image.find((j) => j.contentUrl === img.url);
-  if (jsonLdImg) {
-    jsonLdImg.caption = img.altText;
-    jsonLdImg.name = img.filename.replace(/\.[^/.]+$/, "");
-  } else {
-    product.jsonLd.image.push({
-      "@type": "ImageObject",
-      contentUrl: img.url,
-      caption: img.altText,
-      encodingFormat: `image/${img.format.toLowerCase()}`,
-      width: img.width,
-      height: img.height,
-      name: img.filename.replace(/\.[^/.]+$/, ""),
-    });
-  }
-
-  computeProductScores(product);
   res.json(product);
 });
 
-// 4b. Apply bulk fixes to selected images
-app.post("/api/products/:id/bulk-fix", (req, res) => {
-  const { imageIds, action, altPattern, filenamePattern, customFixes } = req.body;
-  const product = products.find((p) => p.id === req.params.id);
-  if (!product) {
-    res.status(404).json({ error: "Product not found" });
+// ----------------------------------------------------
+// SHOPIFY OAUTH
+// ----------------------------------------------------
+
+const SHOP_COOKIE_OPTIONS = {
+  httpOnly: true,
+  sameSite: "lax" as const,
+  maxAge: 1000 * 60 * 60 * 24 * 30,
+};
+
+// 11. Start OAuth install flow for a shop
+app.get("/api/auth", (req, res) => {
+  const shop = typeof req.query.shop === "string" ? req.query.shop : null;
+  if (!shop || !shopify.isValidShopDomain(shop)) {
+    res.status(400).send("Missing or invalid shop parameter.");
+    return;
+  }
+  if (!SHOPIFY_API_KEY || !SHOPIFY_API_SECRET) {
+    res
+      .status(500)
+      .send("SHOPIFY_API_KEY / SHOPIFY_API_SECRET are not configured on the server.");
     return;
   }
 
-  if (!Array.isArray(imageIds) || imageIds.length === 0) {
-    res.status(400).json({ error: "No imageIds provided" });
-    return;
-  }
-
-  const selectedImages = product.images.filter((img) => imageIds.includes(img.id));
-
-  selectedImages.forEach((img, idx) => {
-    // 1. Custom fixes if provided per-image
-    const customMatch = customFixes?.find((c: any) => c.imageId === img.id);
-    if (customMatch) {
-      if (typeof customMatch.altText === "string" && customMatch.altText.trim()) {
-        img.altText = customMatch.altText.trim();
-        img.issues = img.issues.filter((iss) => iss.type !== "alt_missing" && iss.type !== "alt_weak");
-        img.seoScore = Math.min(100, Math.max(img.seoScore + 18, 85));
-        img.geoScore = Math.min(100, Math.max(img.geoScore + 20, 82));
-      }
-      if (typeof customMatch.filename === "string" && customMatch.filename.trim()) {
-        img.filename = customMatch.filename.trim();
-        img.issues = img.issues.filter((iss) => iss.type !== "filename_generic");
-        img.seoScore = Math.min(100, Math.max(img.seoScore + 12, 85));
-        img.geoScore = Math.min(100, Math.max(img.geoScore + 14, 82));
-      }
-    }
-
-    // 2. Apply proposed alt text
-    if (action === "apply_proposed_alts" || action === "apply_all_proposed") {
-      if (img.proposedAltText) {
-        img.altText = img.proposedAltText;
-        img.issues = img.issues.filter((iss) => iss.type !== "alt_missing" && iss.type !== "alt_weak");
-        img.seoScore = Math.min(100, Math.max(img.seoScore + 18, 88));
-        img.geoScore = Math.min(100, Math.max(img.geoScore + 20, 85));
-      }
-    }
-
-    // 3. Apply proposed filenames
-    if (action === "apply_proposed_filenames" || action === "apply_all_proposed") {
-      if (img.proposedFilename) {
-        img.filename = img.proposedFilename;
-        img.issues = img.issues.filter((iss) => iss.type !== "filename_generic");
-        img.seoScore = Math.min(100, Math.max(img.seoScore + 12, 88));
-        img.geoScore = Math.min(100, Math.max(img.geoScore + 14, 85));
-      }
-    }
-
-    // 4. Apply pattern alt text
-    if ((action === "apply_pattern_alts" || action === "apply_patterns_both") && altPattern) {
-      const positionLabel = img.isHero ? "Primary Hero view" : `Product view ${idx + 1}`;
-      const generated = altPattern
-        .replace(/\{title\}/gi, product.title)
-        .replace(/\{vendor\}/gi, product.vendor)
-        .replace(/\{handle\}/gi, product.handle)
-        .replace(/\{type\}/gi, product.productType)
-        .replace(/\{index\}/gi, String(idx + 1))
-        .replace(/\{total\}/gi, String(selectedImages.length))
-        .replace(/\{position\}/gi, positionLabel);
-
-      img.altText = generated;
-      img.issues = img.issues.filter((iss) => iss.type !== "alt_missing" && iss.type !== "alt_weak");
-      img.seoScore = Math.min(100, Math.max(img.seoScore + 18, 85));
-      img.geoScore = Math.min(100, Math.max(img.geoScore + 20, 82));
-    }
-
-    // 5. Apply pattern filenames
-    if ((action === "apply_pattern_filenames" || action === "apply_patterns_both") && filenamePattern) {
-      const ext = img.filename.includes(".")
-        ? img.filename.substring(img.filename.lastIndexOf("."))
-        : `.${img.format.toLowerCase()}`;
-      
-      let basePattern = filenamePattern.replace(/\.[^/.]+$/, ""); // strip extension in pattern if typed
-      const positionSlug = img.isHero ? "hero" : `angle-${idx + 1}`;
-      const vendorSlug = product.vendor.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      const typeSlug = product.productType.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-
-      const generatedBase = basePattern
-        .replace(/\{handle\}/gi, product.handle)
-        .replace(/\{title\}/gi, product.handle)
-        .replace(/\{vendor\}/gi, vendorSlug)
-        .replace(/\{type\}/gi, typeSlug)
-        .replace(/\{index\}/gi, String(idx + 1))
-        .replace(/\{position\}/gi, positionSlug)
-        .replace(/[^a-zA-Z0-9_-]+/g, "-")
-        .toLowerCase();
-
-      img.filename = `${generatedBase}${ext}`;
-      img.issues = img.issues.filter((iss) => iss.type !== "filename_generic");
-      img.seoScore = Math.min(100, Math.max(img.seoScore + 12, 85));
-      img.geoScore = Math.min(100, Math.max(img.geoScore + 14, 82));
-    }
-
-    // Synchronize JSON-LD ImageObject
-    const jsonLdImg = product.jsonLd.image.find((j) => j.contentUrl === img.url);
-    if (jsonLdImg) {
-      jsonLdImg.caption = img.altText;
-      jsonLdImg.name = img.filename.replace(/\.[^/.]+$/, "");
-    } else {
-      product.jsonLd.image.push({
-        "@type": "ImageObject",
-        contentUrl: img.url,
-        caption: img.altText,
-        encodingFormat: `image/${img.format.toLowerCase()}`,
-        width: img.width,
-        height: img.height,
-        name: img.filename.replace(/\.[^/.]+$/, ""),
-      });
-    }
+  const state = shopify.generateState();
+  res.cookie(shopify.OAUTH_STATE_COOKIE, state, {
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: 5 * 60 * 1000,
   });
 
-  computeProductScores(product);
-  res.json(product);
+  const redirectUri = `${SHOPIFY_APP_URL}/api/auth/callback`;
+  const authorizeUrl =
+    `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(SHOPIFY_API_KEY)}` +
+    `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${state}`;
+
+  res.redirect(authorizeUrl);
 });
 
-// 5. Apply all fixes across product (Alt text, filenames, translations, variant gap auto-linking, JSON-LD)
-app.post("/api/products/:id/apply-all", (req, res) => {
-  const product = products.find((p) => p.id === req.params.id);
-  if (!product) {
-    res.status(404).json({ error: "Product not found" });
+// 12. OAuth callback: exchange code, cache the real catalog, sign in the shop
+app.get("/api/auth/callback", async (req, res) => {
+  const shop = typeof req.query.shop === "string" ? req.query.shop : null;
+  const code = typeof req.query.code === "string" ? req.query.code : null;
+  const state = typeof req.query.state === "string" ? req.query.state : null;
+
+  if (!shop || !code || !shopify.isValidShopDomain(shop)) {
+    res.status(400).send("Invalid callback request.");
+    return;
+  }
+  if (!SHOPIFY_API_SECRET || !shopify.verifyHmac(req.query, SHOPIFY_API_SECRET)) {
+    res.status(401).send("Invalid request signature.");
     return;
   }
 
-  for (const img of product.images) {
-    if (img.proposedAltText) {
-      img.altText = img.proposedAltText;
-    }
-    if (img.proposedFilename) {
-      img.filename = img.proposedFilename;
-    }
-    img.issues = [];
-    img.seoScore = Math.min(100, Math.max(90, img.seoScore + 25));
-    img.geoScore = Math.min(100, Math.max(88, img.geoScore + 28));
-  }
-
-  // Auto assign remaining variant gaps if reasonable match
-  for (const v of product.variants) {
-    if (!v.imageId) {
-      // Pick first secondary image or hero image
-      const fallbackImg = product.images[1] || product.images[0];
-      if (fallbackImg) {
-        v.imageId = fallbackImg.id;
-        if (!fallbackImg.variantIds.includes(v.id)) {
-          fallbackImg.variantIds.push(v.id);
-        }
-      }
-    }
-  }
-
-  // Re-build clean compliant Product JSON-LD schema
-  product.jsonLd.image = product.images.map((img) => ({
-    "@type": "ImageObject",
-    contentUrl: img.url,
-    caption: img.altText,
-    encodingFormat: `image/${img.format.toLowerCase()}`,
-    width: img.width,
-    height: img.height,
-    name: img.filename.replace(/\.[^/.]+$/, ""),
-  }));
-
-  computeProductScores(product);
-  res.json(product);
-});
-
-// 6. Attach image to product (from AI Studio or files)
-app.post("/api/products/:id/attach-image", (req, res) => {
-  const product = products.find((p) => p.id === req.params.id);
-  if (!product) {
-    res.status(404).json({ error: "Product not found" });
+  const cookieState = shopify.readCookie(req.headers.cookie, shopify.OAUTH_STATE_COOKIE);
+  if (!state || !cookieState || state !== cookieState) {
+    res.status(401).send("Invalid OAuth state.");
     return;
   }
 
-  const {
-    url,
-    altText,
-    filename,
-    variantId,
-    isHero,
-    aspectRatio,
-  } = req.body;
+  try {
+    const accessToken = await shopify.exchangeCodeForToken(
+      shop,
+      code,
+      SHOPIFY_API_KEY,
+      SHOPIFY_API_SECRET
+    );
+    shopify.shopTokens.set(shop, accessToken);
 
-  const newImg: ShopifyProductImage = {
-    id: `img_${Date.now()}`,
-    url,
-    altText: altText || `${product.title} product view`,
-    filename: filename || `${product.handle}-view-${Date.now()}.jpg`,
-    width: aspectRatio === "16:9" ? 1920 : aspectRatio === "4:3" ? 1600 : 1800,
-    height: aspectRatio === "16:9" ? 1080 : aspectRatio === "4:3" ? 1200 : 1800,
-    format: "JPEG",
-    fileSizeKb: 1250,
-    variantIds: variantId ? [variantId] : [],
-    isHero: !!isHero,
-    seoScore: 92,
-    geoScore: 89,
-    issues: [],
-    proposedAltText: altText || `${product.title} high resolution e-commerce studio photography`,
-    proposedFilename: filename || `${product.handle}-studio-view.jpg`,
-    translations: {
-      en: altText || `${product.title} product view`,
-      es: `Vista de producto ${product.title}`,
-      fr: `Vue du produit ${product.title}`,
-      de: `Produktansicht ${product.title}`,
-      ja: `${product.title} 商品ビュー`,
-    },
-    inShopifyFiles: true,
-    createdAt: new Date().toISOString(),
-  };
+    const [fetchedProducts, info] = await Promise.all([
+      shopify.fetchShopProducts(shop, accessToken),
+      shopify.fetchShopInfo(shop, accessToken),
+    ]);
+    for (const p of fetchedProducts) computeProductScores(p);
+    shopify.shopProducts.set(shop, fetchedProducts);
+    shopify.shopInfo.set(shop, info);
 
-  if (isHero) {
-    for (const img of product.images) {
-      img.isHero = false;
-    }
-    product.images.unshift(newImg);
-  } else {
-    product.images.push(newImg);
+    res.clearCookie(shopify.OAUTH_STATE_COOKIE);
+    res.cookie(
+      shopify.SHOP_SESSION_COOKIE,
+      shopify.signShopCookie(shop, SHOPIFY_API_SECRET),
+      SHOP_COOKIE_OPTIONS
+    );
+    res.redirect("/");
+  } catch (err) {
+    console.error("Shopify OAuth callback failed:", err);
+    res.status(500).send("Failed to complete Shopify authentication.");
   }
-
-  if (variantId) {
-    const v = product.variants.find((item) => item.id === variantId);
-    if (v) {
-      v.imageId = newImg.id;
-    }
-  }
-
-  // Also add to Shopify Files if not already present
-  shopifyFiles.unshift({
-    id: `file_${Date.now()}`,
-    name: newImg.filename,
-    url: newImg.url,
-    sizeKb: newImg.fileSizeKb,
-    contentType: "image/jpeg",
-    altText: newImg.altText,
-    usedInProductsCount: 1,
-    createdAt: new Date().toISOString(),
-  });
-
-  // Re-build Product JSON-LD
-  product.jsonLd.image = product.images.map((img) => ({
-    "@type": "ImageObject",
-    contentUrl: img.url,
-    caption: img.altText,
-    encodingFormat: `image/${img.format.toLowerCase()}`,
-    width: img.width,
-    height: img.height,
-    name: img.filename.replace(/\.[^/.]+$/, ""),
-  }));
-
-  computeProductScores(product);
-  res.json(product);
 });
 
-// 7. Save image to Shopify Files directly
-app.post("/api/shopify/files", (req, res) => {
-  const { name, url, altText, sizeKb } = req.body;
-  const newFile: ShopifyFile = {
-    id: `file_${Date.now()}`,
-    name: name || `shopify-asset-${Date.now()}.jpg`,
-    url,
-    sizeKb: sizeKb || 1200,
-    contentType: "image/jpeg",
-    altText: altText || "Store product asset",
-    usedInProductsCount: 0,
-    createdAt: new Date().toISOString(),
-  };
-  shopifyFiles.unshift(newFile);
-  res.json(newFile);
-});
-
-app.get("/api/shopify/files", (req, res) => {
-  res.json(shopifyFiles);
-});
-
-// 8. Run full store audit
-app.post("/api/audit-all", (req, res) => {
-  const summary = computeStoreSummary();
-  res.json({
-    summary,
-    products,
-  });
-});
-
-// 9. AI Studio - Image Generation Endpoint via Gemini
-app.post("/api/gemini/generate-image", async (req, res) => {
-  const {
-    prompt,
-    mode,
-    aspectRatio = "1:1",
-    productTitle,
-    productId,
-    stylePreset,
-    lightingPreset,
-    compositionPreset,
-    colorwayTarget,
-    referenceImageUrl,
-  } = req.body;
-
-  const ai = getGeminiClient();
-
-  // Curated high-aesthetic domain imagery for instant, reliable e-commerce outputs
-  // if Gemini API key requires paid tier (nano banana) or is running in demo mode
-  const presetCatalog: Record<string, string[]> = {
-    hero: [
-      "https://images.unsplash.com/photo-1544022613-e87ca75a784a?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1523275335684-37898b6baf30?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1546868871-7041f2a55e12?q=80&w=1200&auto=format&fit=crop",
-    ],
-    variant: [
-      "https://images.unsplash.com/photo-1576995853123-5a10305d93c0?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1551028719-00167b16eac5?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1521572267360-ee0c2909d518?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1584917865442-de89df76afd3?q=80&w=1200&auto=format&fit=crop",
-    ],
-    lifestyle: [
-      "https://images.unsplash.com/photo-1517841905240-472988babdf9?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1483985988355-763728e1935b?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1441986300917-64674bd600d8?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1512436991641-6745cdb1723f?q=80&w=1200&auto=format&fit=crop",
-    ],
-    background: [
-      "https://images.unsplash.com/photo-1560343090-f0409e92791a?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1572635196237-14b3f281503f?q=80&w=1200&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1507473885765-e6ed057f782c?q=80&w=1200&auto=format&fit=crop",
-    ],
-    banner: [
-      "https://images.unsplash.com/photo-1441984904996-e0b6ba687e04?q=80&w=1600&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1469334031218-e382a71b716b?q=80&w=1600&auto=format&fit=crop",
-      "https://images.unsplash.com/photo-1472851294608-062f824d29cc?q=80&w=1600&auto=format&fit=crop",
-    ],
-  };
-
-  let generatedImageUrl = "";
-  let enhancedPrompt = prompt;
-
-  if (ai) {
-    try {
-      // First, use Gemini 3.8 Flash to compose the ultimate commercial photography prompt
-      const promptEnhanceRes = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: `You are an art director for high-end Shopify commercial photography.
-Product: ${productTitle || "Product"}
-Studio Mode: ${mode} (${
-          mode === "hero"
-            ? "High-impact hero shot for collection header or primary product image"
-            : mode === "variant"
-            ? `Consistent variant colorway (${colorwayTarget || "Alternate colorway"}) shot keeping exact angle and geometry`
-            : mode === "lifestyle"
-            ? "Realistic in-situ situational scene with atmospheric depth"
-            : mode === "background"
-            ? "Clean, seamless e-commerce studio background with soft realistic contact shadows"
-            : "Wide commercial hero banner with spacious negative space for typography"
-        })
-Lighting: ${lightingPreset || "Commercial softbox with gentle rim accent"}
-Composition: ${compositionPreset || "Centered product focal"}
-Style: ${stylePreset || "Minimalist contemporary e-commerce"}
-User details: ${prompt}
-
-Generate a concise 1-sentence prompt description for the image, plus an SEO-optimized alt text and filename.
-Return JSON strictly:
-{
-  "enhancedPrompt": "...",
-  "suggestedAltText": "...",
-  "suggestedFilename": "..."
-}`,
-        config: {
-          responseMimeType: "application/json",
-        },
-      });
-
-      let metaData = {
-        enhancedPrompt: prompt,
-        suggestedAltText: `${productTitle} - ${mode} commercial photography shot`,
-        suggestedFilename: `${(productTitle || "product").toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${mode}.jpg`,
-      };
-
-      if (promptEnhanceRes.text) {
-        try {
-          metaData = JSON.parse(promptEnhanceRes.text);
-          enhancedPrompt = metaData.enhancedPrompt || prompt;
-        } catch {
-          // ignore parse error
-        }
-      }
-
-      // Try image generation via Gemini image model
-      try {
-        const imageGenRes = await ai.models.generateContent({
-          model: "gemini-3.1-flash-lite-image",
-          contents: {
-            parts: [{ text: `${enhancedPrompt}, 8k photorealistic commercial e-commerce product photograph, sharp focus, professional lighting` }],
-          },
-          config: {
-            imageConfig: {
-              aspectRatio: aspectRatio as any,
-            },
-          },
-        });
-
-        if (imageGenRes.candidates?.[0]?.content?.parts) {
-          for (const part of imageGenRes.candidates[0].content.parts) {
-            if (part.inlineData?.data) {
-              generatedImageUrl = `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
-              break;
-            }
-          }
-        }
-      } catch (imgErr) {
-        console.warn("Gemini image generation unavailable or requires paid key, using studio curated preset:", imgErr);
-      }
-
-      // If inlineData was not returned (or quota), choose the best matching high-res curated photo
-      if (!generatedImageUrl) {
-        const modeList = presetCatalog[mode] || presetCatalog.hero;
-        generatedImageUrl = modeList[Math.floor(Math.random() * modeList.length)];
-      }
-
-      const result = {
-        id: `gen_${Date.now()}`,
-        url: generatedImageUrl,
-        prompt: enhancedPrompt,
-        mode,
-        aspectRatio,
-        width: aspectRatio === "16:9" ? 1920 : aspectRatio === "4:3" ? 1600 : 2048,
-        height: aspectRatio === "16:9" ? 1080 : aspectRatio === "4:3" ? 1200 : 2048,
-        seoScore: 98,
-        geoScore: 95,
-        resolutionLabel: `${aspectRatio === "16:9" ? "1920×1080" : aspectRatio === "4:3" ? "1600×1200" : "2048×2048"} HD`,
-        suggestedAltText: metaData.suggestedAltText,
-        suggestedFilename: metaData.suggestedFilename,
-        timestamp: new Date().toISOString(),
-        qualityImprovements: [
-          "+52 SEO & GEO score improvement",
-          "Retina Zoom resolution standard",
-          "Calibrated softbox studio lighting & clean depth",
-          "Standardized aspect ratio",
-        ],
-      };
-
-      if (productId) {
-        const prod = products.find((p) => p.id === productId);
-        if (prod) {
-          if (!prod.studioGenerations) prod.studioGenerations = [];
-          prod.studioGenerations.unshift(result);
-        }
-      }
-
-      res.json(result);
-      return;
-    } catch (err: any) {
-      console.warn("Gemini generation flow error:", err?.message);
-    }
-  }
-
-  // Graceful fallback if no API key or network error
-  const modeList = presetCatalog[mode] || presetCatalog.hero;
-  const pickedUrl = modeList[Math.floor(Math.random() * modeList.length)];
-
-  const fallbackResult = {
-    id: `gen_${Date.now()}`,
-    url: pickedUrl,
-    prompt: prompt || `Professional ${mode} photography for ${productTitle}`,
-    mode,
-    aspectRatio,
-    width: aspectRatio === "16:9" ? 1920 : aspectRatio === "4:3" ? 1600 : 1800,
-    height: aspectRatio === "16:9" ? 1080 : aspectRatio === "4:3" ? 1200 : 1800,
-    seoScore: 95,
-    geoScore: 92,
-    resolutionLabel: "Retina HD (1800×1800)",
-    suggestedAltText: `${productTitle || "Product"} in ${mode} setting with ${lightingPreset || "studio"} lighting`,
-    suggestedFilename: `${(productTitle || "product").toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${mode}-optimized.jpg`,
-    timestamp: new Date().toISOString(),
-    qualityImprovements: [
-      "+45 SEO & GEO score improvement",
-      "High-resolution 1800×1800 px zoom readiness",
-      "Calibrated e-commerce studio reflections",
-      "Marketplace-compliant catalog composition",
-    ],
-  };
-
-  if (productId) {
-    const prod = products.find((p) => p.id === productId);
-    if (prod) {
-      if (!prod.studioGenerations) prod.studioGenerations = [];
-      prod.studioGenerations.unshift(fallbackResult);
-    }
-  }
-
-  res.json(fallbackResult);
-});
-
-// 10. Direct Gemini JSON-LD schema builder
-app.post("/api/gemini/generate-json-ld", async (req, res) => {
-  const { product } = req.body;
-  if (!product) {
-    res.status(400).json({ error: "Missing product" });
+// 13. Connected shop info, for nav branding (demo mode when not connected)
+app.get("/api/shop", (req, res) => {
+  const shop = res.locals.shop as string | null;
+  const info = shop ? shopify.shopInfo.get(shop) : null;
+  if (!info) {
+    res.json({ connected: false });
     return;
   }
+  res.json({ connected: true, shopName: info.name, shopDomain: info.domain });
+});
 
-  const ai = getGeminiClient();
-  if (ai) {
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: `Generate a 100% valid Schema.org Product JSON-LD for this Shopify item, with enhanced ImageObject definitions for visual search and AI engine grounding (ChatGPT, Perplexity):
-Product Title: ${product.title}
-Handle: ${product.handle}
-Price: ${product.priceRange.min}
-Vendor: ${product.vendor}
-Images: ${JSON.stringify(
-          product.images.map((i: any) => ({
-            url: i.url,
-            alt: i.altText,
-            filename: i.filename,
-            width: i.width,
-            height: i.height,
-          }))
-        )}
-
-Return valid JSON conforming to Schema.org standards with @context: "https://schema.org/", @type: "Product", brand, offers, and image as an array of ImageObject.`,
-        config: {
-          responseMimeType: "application/json",
-        },
-      });
-
-      if (response.text) {
-        const jsonLd = JSON.parse(response.text);
-        res.json({ jsonLd });
-        return;
-      }
-    } catch (err) {
-      console.warn("Gemini JSON-LD generation error:", err);
-    }
+// Entry point when the app is opened from the Shopify admin (?shop=...).
+// Always renders the app shell — for an embedded app, real authentication
+// happens client-side via App Bridge's ID token on the first /api/* call
+// (see resolveShopForRequest), not by gating this top-level page load. A
+// hard gate here would also be wrong in practice: Shopify's own iframe
+// navigation inside the admin SPA doesn't necessarily carry a signed hmac
+// on every load the way the old redirect-based flow assumed.
+//
+// The cookie fallback below (for plain-browser-tab / non-embedded testing)
+// stays hmac-gated, since — unlike the page shell — it grants read/write
+// access to a specific shop's cached data, so it must only be set from a
+// request Shopify actually signed.
+app.get("/", (req, res, next) => {
+  const shop = typeof req.query.shop === "string" ? req.query.shop : null;
+  if (
+    shop &&
+    SHOPIFY_API_SECRET &&
+    shopify.isValidShopDomain(shop) &&
+    shopify.verifyHmac(req.query, SHOPIFY_API_SECRET) &&
+    shopify.shopTokens.has(shop)
+  ) {
+    res.cookie(
+      shopify.SHOP_SESSION_COOKIE,
+      shopify.signShopCookie(shop, SHOPIFY_API_SECRET),
+      SHOP_COOKIE_OPTIONS
+    );
   }
-
-  // Fallback programmatic generator
-  const fallbackJsonLd = {
-    "@context": "https://schema.org/",
-    "@type": "Product",
-    name: product.title,
-    description: product.description,
-    sku: product.variants[0]?.sku || "SKU-DEFAULT",
-    brand: {
-      "@type": "Brand",
-      name: product.vendor,
-    },
-    offers: {
-      "@type": "Offer",
-      priceCurrency: "USD",
-      price: product.priceRange.min,
-      availability: "https://schema.org/InStock",
-      url: `https://aura-store.myshopify.com/products/${product.handle}`,
-    },
-    image: product.images.map((img: any) => ({
-      "@type": "ImageObject",
-      contentUrl: img.url,
-      caption: img.altText || product.title,
-      encodingFormat: `image/${(img.format || "jpeg").toLowerCase()}`,
-      width: img.width || 1800,
-      height: img.height || 1800,
-      name: img.filename ? img.filename.replace(/\.[^/.]+$/, "") : product.handle,
-    })),
-  };
-
-  res.json({ jsonLd: fallbackJsonLd });
+  next();
 });
 
 // Vite middleware / production static handler
@@ -1692,7 +1076,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Next AI Shopify App server running on http://0.0.0.0:${PORT}`);
+    console.log(`Next Image Studio server running on http://0.0.0.0:${PORT}`);
   });
 }
 

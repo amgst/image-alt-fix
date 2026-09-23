@@ -1,11 +1,10 @@
 # Shopify Image SEO
 
-Shopify image SEO and GEO workspace for auditing product media, improving alt text and filenames, reviewing Shopify Files, and generating product imagery with Gemini.
+Shopify image SEO and GEO workspace for auditing product media, improving alt text and filenames, reviewing Shopify Files, and generating product imagery.
 
 ## Requirements
 
 - Node.js 20.19 or newer
-- A Gemini API key for AI audit and image-generation actions
 
 ## Local development
 
@@ -15,7 +14,7 @@ Shopify image SEO and GEO workspace for auditing product media, improving alt te
    npm install
    ```
 
-2. Copy `.env.example` to `.env` and set `GEMINI_API_KEY`.
+2. Copy `.env.example` to `.env`.
 
 3. Start the app:
 
@@ -24,6 +23,20 @@ Shopify image SEO and GEO workspace for auditing product media, improving alt te
    ```
 
 Open `http://localhost:3000` in a browser. The development server serves the React UI and API from the same origin.
+
+## Shopify CLI development
+
+This project includes `shopify.app.toml` so Shopify CLI can recognize the directory. Before running `shopify app dev`:
+
+1. Create or select the app in the Shopify Dev Dashboard.
+2. Copy its client ID into `shopify.app.toml` in place of `REPLACE_WITH_SHOPIFY_CLIENT_ID`.
+3. Run:
+
+   ```bash
+   shopify app dev
+   ```
+
+The current server is still a local prototype. The CLI configuration prepares the app directory and development URL, but OAuth callback handling and live Shopify Admin API access still need to be implemented before merchant installation.
 
 ## Validation and production
 
@@ -37,10 +50,9 @@ npm start
 
 ## Environment variables
 
-- `GEMINI_API_KEY`: enables Gemini-backed audits, image generation, and JSON-LD generation.
 - `PORT`: currently fixed to `3000` by the server and reserved for a future deployment configuration.
 
-Without `GEMINI_API_KEY`, the seeded catalog and non-AI workflows still load, but Gemini-backed actions return an unavailable response.
+Audits, image generation, and JSON-LD generation are all rule-based and run entirely on the server — no external AI API or key is required.
 
 ## Current Shopify boundary
 
