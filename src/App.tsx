@@ -5,6 +5,7 @@ import { Overview } from './components/Overview';
 import { ImagesList } from './components/ImagesList';
 import { Settings } from './components/Settings';
 import type { ShopifyProduct } from './types';
+import { shopifyFetch } from './utils/shopifyFetch';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<AppTab>('overview');
@@ -15,7 +16,10 @@ export default function App() {
   const fetchData = async () => {
     try {
       setIsLoading(true);
-      const [prodRes, shopRes] = await Promise.all([fetch('/api/products'), fetch('/api/shop')]);
+      const [prodRes, shopRes] = await Promise.all([
+        shopifyFetch('/api/products'),
+        shopifyFetch('/api/shop'),
+      ]);
 
       if (prodRes.ok) {
         const data = await prodRes.json();
@@ -41,7 +45,7 @@ export default function App() {
 
   const handleApplyFix = async (productId: string, imageId: string, field: string, value: string) => {
     try {
-      const res = await fetch(`/api/products/${encodeURIComponent(productId)}/apply-fix`, {
+      const res = await shopifyFetch(`/api/products/${encodeURIComponent(productId)}/apply-fix`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageId, field, value }),
