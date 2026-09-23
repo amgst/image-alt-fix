@@ -16,5 +16,4 @@ scopes = "read_files,read_products,write_files,write_products"
 redirect_urls = [ "http://localhost:3000/api/auth/callback" ]
 
 [build]
-include_config_on_deploy = true
 automatically_update_urls_on_dev = true
