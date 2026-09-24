@@ -12,7 +12,7 @@ export const TopBar: React.FC<TopBarProps> = ({ shopInfo }) => {
         <div className="w-7 h-7 rounded-md bg-[#008060] flex items-center justify-center">
           <ImagePlus className="w-4 h-4 text-white" />
         </div>
-        <span className="font-bold text-[#202223]">Image SEO</span>
+        <span className="font-bold text-[#202223]">Image Alt Fix</span>
       </div>
 
       {shopInfo && (

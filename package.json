@@ -1,10 +1,10 @@
 {
-  "name": "shopify-image-seo",
+  "name": "image-alt-fix",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "tsx watch --clear-screen=false server.ts",
     "shopify:dev": "shopify app dev",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
@@ -25,7 +25,7 @@
     "vite": "^8.3.0"
   },
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.13.0"
   },
   "devDependencies": {
     "@types/d3": "^7.4.3",

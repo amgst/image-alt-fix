@@ -1,0 +1,13 @@
+[
+  {
+    "id": "tip-google-images-2026-09",
+    "tone": "info",
+    "title": "Descriptive ALT text helps your products appear in Google Images",
+    "message": "Describe what the image shows, such as the product, its color and material, in a short sentence. Avoid starting with \"image of\".",
+    "action": {
+      "label": "Google's image SEO guide",
+      "url": "https://developers.google.com/search/docs/appearance/google-images"
+    },
+    "dismissible": true
+  }
+]

@@ -1,12 +1,13 @@
-# Shopify Image SEO
+# Image Alt Fix
 
-Shopify image SEO and GEO workspace for auditing product media, improving alt text and filenames, reviewing Shopify Files, and generating product imagery.
+Embedded Shopify app for reviewing and fixing product image ALT text. It reads every product image from the store and writes ALT text changes back to Shopify.
 
 ## Requirements
 
-- Node.js 20.19 or newer
+- Node.js 22.13 or newer. The app uses Node's built-in SQLite module.
+- Shopify CLI, and the "Image Alt Fix" app in the Shopify Dev Dashboard
 
-## Local development
+## Development
 
 1. Install dependencies:
 
@@ -14,29 +15,53 @@ Shopify image SEO and GEO workspace for auditing product media, improving alt te
    npm install
    ```
 
-2. Copy `.env.example` to `.env`.
+2. Copy `.env.example` to `.env` and fill in the client secret from the Dev Dashboard.
 
-3. Start the app:
-
-   ```bash
-   npm run dev
-   ```
-
-Open `http://localhost:3000` in a browser. The development server serves the React UI and API from the same origin.
-
-## Shopify CLI development
-
-This project includes `shopify.app.toml` so Shopify CLI can recognize the directory. Before running `shopify app dev`:
-
-1. Create or select the app in the Shopify Dev Dashboard.
-2. Copy its client ID into `shopify.app.toml` in place of `REPLACE_WITH_SHOPIFY_CLIENT_ID`.
-3. Run:
+3. Start the app through Shopify CLI:
 
    ```bash
-   shopify app dev
+   shopify app dev --config image-alt-fix
    ```
 
-The current server is still a local prototype. The CLI configuration prepares the app directory and development URL, but OAuth callback handling and live Shopify Admin API access still need to be implemented before merchant installation.
+   The CLI starts the server with `npm run dev` (see `shopify.web.toml`), opens an HTTPS tunnel, points the app's URL at it, and passes in the client ID, secret, app URL and scopes. Open the app from the preview link the CLI prints.
+
+Opening `http://localhost:3000` directly shows a "not authenticated" message. The app only works inside the Shopify admin, where App Bridge supplies a session token.
+
+## How it works
+
+- **Installation and authentication.** Shopify managed installation handles install and scope approval. Each API call carries an App Bridge session token, which the server verifies and exchanges for an offline Admin API access token. The app uses no cookies for authentication, so it works in incognito windows and with third-party cookies blocked.
+- **Token storage.** Access tokens are saved in SQLite at `DATABASE_PATH` (default `./data/app.sqlite`). A missing token, or one that lacks a scope the app now requires, is replaced through token exchange on the next request.
+- **Scopes.** `read_products` to read products and their images, and `write_files` to save ALT text. Keep `SCOPES` equal to `[access_scopes]` in the app config.
+- **Reading.** The catalog is re-read from Shopify on every load and on "Sync from Shopify", following pagination through all products and all of their images.
+- **Writing.** ALT text is saved with the Admin GraphQL `fileUpdate` mutation on each image's MediaImage ID. The UI only shows a change as saved once Shopify confirms it.
+- **Webhooks.** `/api/webhooks` verifies Shopify's HMAC signature and handles `app/uninstalled` plus the three mandatory privacy compliance topics. The subscriptions are declared in `shopify.app.image-alt-fix.toml`.
+
+## Dashboard banners
+
+The Overview page shows banners from `banners.json` in the project root. The server re-reads the file on every page load, so edits appear without a restart. Merchants can dismiss a banner, and it stays hidden in their browser. Give a banner a new `id` to show it again.
+
+```json
+[
+  {
+    "id": "inventory-alerts-launch",
+    "tone": "promo",
+    "title": "New from Wbify: Inventory Alerts",
+    "message": "Get notified before your best sellers run out.",
+    "imageUrl": "https://cdn.example.com/inventory-alerts.png",
+    "action": { "label": "Learn more", "url": "https://apps.shopify.com/..." },
+    "startsAt": "2026-10-01T00:00:00Z",
+    "endsAt": "2026-10-31T23:59:59Z",
+    "dismissible": true
+  }
+]
+```
+
+- `id` and `title` are required. Everything else is optional.
+- `tone` is `info`, `success`, `warning`, `critical` or `promo`. `promo` renders as a dark feature banner.
+- `imageUrl` and `action.url` must be `https://` links, otherwise they are dropped.
+- `startsAt` and `endsAt` limit when the banner shows.
+
+A separate status banner, driven by the store's own ALT text numbers, always appears above these.
 
 ## Validation and production
 
@@ -46,14 +71,11 @@ npm run build
 npm start
 ```
 
-`npm run build` creates the browser assets in `dist/` and the bundled server at `dist/server.cjs`. `npm start` serves the production build on port `3000`.
+`npm run build` creates the browser assets in `dist/` and the bundled server at `dist/server.cjs`. `npm start` serves the production build on `PORT`, or `3000` if it is not set.
 
-## Environment variables
+## Before going to production
 
-- `PORT`: currently fixed to `3000` by the server and reserved for a future deployment configuration.
-
-Audits, image generation, and JSON-LD generation are all rule-based and run entirely on the server — no external AI API or key is required.
-
-## Current Shopify boundary
-
-This repository is a functional local prototype. Its catalog and Shopify Files data are seeded in server memory and reset whenever the server restarts. It does not yet include Shopify OAuth, App Bridge, Admin GraphQL access, webhook handling, or persistent storage. Before installing it for a merchant, replace the seeded data layer with authenticated Shopify Admin API calls and add durable storage for audit results and settings.
+- **Hosting.** Deploy to a host with a stable HTTPS URL. Set `application_url` and `redirect_urls` in `shopify.app.image-alt-fix.toml` to it, then run `shopify app deploy`.
+- **Environment.** Set `SHOPIFY_API_KEY`, `VITE_SHOPIFY_API_KEY` (at build time), `SHOPIFY_API_SECRET`, `SCOPES` and `NODE_ENV=production`.
+- **Persistent storage.** Point `DATABASE_PATH` at a persistent volume. SQLite suits a single server instance. Running several instances needs a shared database such as Postgres behind the same functions in `tokenStore.ts`.
+- **Listing.** Prepare a privacy policy URL, support contact, screenshots and description in the Partner Dashboard.

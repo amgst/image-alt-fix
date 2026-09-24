@@ -23,7 +23,7 @@ export const Settings: React.FC<SettingsProps> = ({ shopInfo }) => {
               {shopInfo ? shopInfo.shopName : 'Not connected'}
             </div>
             <div className="text-xs text-[#6d7175] font-mono">
-              {shopInfo ? shopInfo.shopDomain : 'Showing demo data'}
+              {shopInfo ? shopInfo.shopDomain : 'Open the app from your Shopify admin'}
             </div>
           </div>
         </div>

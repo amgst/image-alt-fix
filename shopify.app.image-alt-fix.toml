@@ -8,9 +8,18 @@ embedded = true
 [webhooks]
 api_version = "2026-10"
 
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/api/webhooks"
+
+  # Mandatory privacy compliance webhooks for App Store apps.
+  [[webhooks.subscriptions]]
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+  uri = "/api/webhooks"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_files,read_products,write_files,write_products"
+scopes = "read_products,write_files"
 
 [auth]
 redirect_urls = [ "http://localhost:3000/api/auth/callback" ]

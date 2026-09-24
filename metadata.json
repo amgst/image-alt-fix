@@ -1,7 +1,6 @@
 {
-  "name": "Next Image Studio & SEO/GEO",
-  "description": "Product image studio and image SEO/GEO monitoring for Shopify admin. Generate hero shots, variants, lifestyle scenes, backgrounds, and banners, audit scores, and fix alt text, filenames, variant gaps, and Product JSON-LD.",
+  "name": "Image Alt Fix",
+  "description": "Find and fix missing, short and duplicate ALT text on your Shopify product images, and save changes straight to your store.",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }
-

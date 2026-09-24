@@ -1,7 +1,7 @@
 import React from 'react';
-import { LayoutGrid, Image as ImageIcon, Settings as SettingsIcon } from 'lucide-react';
+import { LayoutGrid, Package, Image as ImageIcon, Settings as SettingsIcon } from 'lucide-react';
 
-export type AppTab = 'overview' | 'images' | 'settings';
+export type AppTab = 'overview' | 'products' | 'images' | 'settings';
 
 interface SidebarProps {
   currentTab: AppTab;
@@ -10,6 +10,7 @@ interface SidebarProps {
 
 const NAV_ITEMS: { id: AppTab; label: string; icon: React.ElementType }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutGrid },
+  { id: 'products', label: 'Products', icon: Package },
   { id: 'images', label: 'Images', icon: ImageIcon },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];

@@ -8,6 +8,7 @@ declare global {
   interface Window {
     shopify?: {
       idToken: () => Promise<string>;
+      toast?: { show: (message: string, options?: { isError?: boolean; duration?: number }) => void };
     };
   }
 }
@@ -27,4 +28,11 @@ export async function shopifyFetch(input: string, init: RequestInit = {}): Promi
   const headers = new Headers(init.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return fetch(input, { ...init, headers });
+}
+
+// Shows an App Bridge toast in the Shopify admin, or logs when App Bridge is
+// not available (for example in a plain browser tab).
+export function showToast(message: string, isError = false): void {
+  if (window.shopify?.toast) window.shopify.toast.show(message, { isError });
+  else (isError ? console.error : console.log)(message);
 }

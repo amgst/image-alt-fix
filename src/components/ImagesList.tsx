@@ -1,38 +1,40 @@
 import React, { useMemo, useState } from 'react';
-import { Search, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, Loader2 } from 'lucide-react';
 import type { ShopifyProduct } from '../types';
-import { flattenProductImages, type FlatImageRow, type ImageStatus } from '../utils/imageStatus';
+import type { AltSaveResult, AltUpdate } from '../App';
+import { flattenProductImages } from '../utils/imageStatus';
+import { useAltEditor, productTitleAlt } from '../hooks/useAltEditor';
+import { AltTextInput } from './AltTextInput';
+import { StatusBadge } from './StatusBadge';
+import { PageHeader } from './PageHeader';
+import { Pagination } from './Pagination';
 
 interface ImagesListProps {
   products: ShopifyProduct[];
-  onApplyFix: (productId: string, imageId: string, field: string, value: string) => Promise<void>;
+  onSaveAltTexts: (updates: AltUpdate[]) => Promise<AltSaveResult>;
+  onRefresh: () => void;
+  isRefreshing: boolean;
+  initialStatusFilter?: StatusFilter;
 }
 
-const STATUS_LABEL: Record<ImageStatus, string> = {
-  missing: 'Missing',
-  poor: 'Poor',
-  duplicate: 'Duplicate',
-  good: 'Good',
-};
-
-const STATUS_BADGE_CLASS: Record<ImageStatus, string> = {
-  missing: 'bg-[#fef3c7] text-[#92400e]',
-  poor: 'bg-[#f1f2f4] text-[#4a4a4a]',
-  duplicate: 'bg-[#e0e7ff] text-[#3730a3]',
-  good: 'bg-[#e6f4ea] text-[#006e52]',
-};
-
-type StatusFilter = 'all' | 'issues' | 'missing' | 'duplicate' | 'good';
+export type StatusFilter = 'all' | 'issues' | 'missing' | 'poor' | 'duplicate' | 'good';
 
 const PAGE_SIZE = 10;
 
-export const ImagesList: React.FC<ImagesListProps> = ({ products, onApplyFix }) => {
+export const ImagesList: React.FC<ImagesListProps> = ({
+  products,
+  onSaveAltTexts,
+  onRefresh,
+  isRefreshing,
+  initialStatusFilter = 'all',
+}) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [formatFilter, setFormatFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(initialStatusFilter);
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [isBulkSaving, setIsBulkSaving] = useState(false);
+  const editor = useAltEditor(onSaveAltTexts);
 
   const allRows = useMemo(() => flattenProductImages(products), [products]);
 
@@ -64,9 +66,17 @@ export const ImagesList: React.FC<ImagesListProps> = ({ products, onApplyFix }) 
 
   const resetToFirstPage = () => setPage(1);
 
-  const commitAltText = async (row: FlatImageRow, value: string) => {
-    if (value === row.image.altText) return;
-    await onApplyFix(row.product.id, row.image.id, 'altText', value);
+  // Bulk action: sets each selected image's ALT text to its product title.
+  const applyProductTitles = async () => {
+    const rows = allRows.filter((r) => selectedIds.has(r.image.id));
+    if (rows.length === 0) return;
+    setIsBulkSaving(true);
+    const result = await editor.save(
+      rows.map((r) => ({ imageId: r.image.id, altText: productTitleAlt(r.product, r.image) }))
+    );
+    setIsBulkSaving(false);
+    const failed = new Set(result.failed.map((f) => f.imageId));
+    setSelectedIds((prev) => new Set([...prev].filter((id) => failed.has(id))));
   };
 
   const toggleSelectOne = (imageId: string) => {
@@ -93,10 +103,12 @@ export const ImagesList: React.FC<ImagesListProps> = ({ products, onApplyFix }) 
 
   return (
     <div className="space-y-4 max-w-6xl mx-auto pb-12">
-      <div>
-        <h1 className="text-2xl font-bold text-[#202223]">Images</h1>
-        <p className="text-sm text-[#6d7175] mt-1">Review and improve ALT text across your catalog.</p>
-      </div>
+      <PageHeader
+        title="Images"
+        description="Review and improve ALT text across your catalog. Changes save to Shopify when you leave a field or press Enter."
+        onRefresh={onRefresh}
+        isRefreshing={isRefreshing}
+      />
 
       <div className="bg-white border border-[#e1e3e5] rounded-xl shadow-xs overflow-hidden">
         <div className="p-4 flex flex-col md:flex-row gap-3 border-b border-[#e1e3e5]">
@@ -136,6 +148,7 @@ export const ImagesList: React.FC<ImagesListProps> = ({ products, onApplyFix }) 
               ['all', 'All'],
               ['issues', 'Issues'],
               ['missing', 'Missing ALT'],
+              ['poor', 'Poor'],
               ['duplicate', 'Duplicate'],
               ['good', 'Good'],
             ] as [StatusFilter, string][]
@@ -156,6 +169,27 @@ export const ImagesList: React.FC<ImagesListProps> = ({ products, onApplyFix }) 
             </button>
           ))}
         </div>
+
+        {selectedIds.size > 0 && (
+          <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 bg-[#f1f8f5] border-b border-[#e1e3e5] text-sm">
+            <span className="font-semibold text-[#202223]">{selectedIds.size} selected</span>
+            <button
+              onClick={applyProductTitles}
+              disabled={isBulkSaving}
+              className="flex items-center gap-1.5 px-3 py-1.5 font-semibold text-white bg-[#008060] rounded-lg hover:bg-[#006e52] disabled:opacity-60 transition"
+            >
+              {isBulkSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+              Use product title as ALT
+            </button>
+            <button
+              onClick={() => setSelectedIds(new Set())}
+              disabled={isBulkSaving}
+              className="px-3 py-1.5 font-medium text-[#4a4a4a] hover:text-[#202223] disabled:opacity-60"
+            >
+              Clear selection
+            </button>
+          </div>
+        )}
 
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -184,88 +218,52 @@ export const ImagesList: React.FC<ImagesListProps> = ({ products, onApplyFix }) 
                   </td>
                 </tr>
               ) : (
-                pageRows.map((row) => {
-                  const draft = drafts[row.image.id] ?? row.image.altText;
-                  return (
-                    <tr key={row.image.id} className="hover:bg-[#f6f7f8] transition-colors">
-                      <td className="py-3 px-4">
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(row.image.id)}
-                          onChange={() => toggleSelectOne(row.image.id)}
-                          aria-label={`Select ${row.product.title} image`}
-                          className="w-4 h-4 rounded border-[#d2d5d8] text-[#008060] focus:ring-[#008060]"
+                pageRows.map((row) => (
+                  <tr key={row.image.id} className="hover:bg-[#f6f7f8] transition-colors">
+                    <td className="py-3 px-4">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(row.image.id)}
+                        onChange={() => toggleSelectOne(row.image.id)}
+                        aria-label={`Select ${row.product.title} image`}
+                        className="w-4 h-4 rounded border-[#d2d5d8] text-[#008060] focus:ring-[#008060]"
+                      />
+                    </td>
+                    <td className="py-3 px-4">
+                      <div className="w-12 h-12 rounded-lg bg-[#f1f2f4] overflow-hidden border border-[#e1e3e5]">
+                        <img
+                          src={row.image.url}
+                          alt={row.image.altText || row.product.title}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
                         />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="w-12 h-12 rounded-lg bg-[#f1f2f4] overflow-hidden border border-[#e1e3e5]">
-                          <img
-                            src={row.image.url}
-                            alt={row.image.altText || row.product.title}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="font-semibold text-[#202223]">{row.product.title}</div>
-                        <div className="text-xs text-[#6d7175]">
-                          {row.product.vendor} · {row.product.productType || 'Product'}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <input
-                          type="text"
-                          placeholder="Add ALT text"
-                          value={draft}
-                          onChange={(e) =>
-                            setDrafts((prev) => ({ ...prev, [row.image.id]: e.target.value }))
-                          }
-                          onBlur={(e) => commitAltText(row, e.target.value)}
-                          className="w-full px-3 py-1.5 text-sm border border-[#d2d5d8] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#008060]"
-                        />
-                      </td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${STATUS_BADGE_CLASS[row.status]}`}
-                        >
-                          {STATUS_LABEL[row.status]}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })
+                      </div>
+                    </td>
+                    <td className="py-3 px-4">
+                      <div className="font-semibold text-[#202223]">{row.product.title}</div>
+                      <div className="text-xs text-[#6d7175]">
+                        {row.product.vendor} · {row.product.productType || 'Product'}
+                      </div>
+                    </td>
+                    <td className="py-3 px-4">
+                      <AltTextInput image={row.image} editor={editor} />
+                    </td>
+                    <td className="py-3 px-4">
+                      <StatusBadge status={row.status} />
+                    </td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
         </div>
 
-        <div className="flex items-center justify-between px-4 py-3 border-t border-[#e1e3e5] text-sm text-[#6d7175]">
-          <span>
-            {filteredRows.length === 0
-              ? 'Showing 0 of 0'
-              : `Showing ${(currentPage - 1) * PAGE_SIZE + 1}–${Math.min(currentPage * PAGE_SIZE, filteredRows.length)} of ${filteredRows.length}`}
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage <= 1}
-              className="p-1.5 rounded-lg border border-[#d2d5d8] disabled:opacity-40 hover:bg-[#f1f2f4] transition"
-              aria-label="Previous page"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <span>Page {currentPage}</span>
-            <button
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage >= totalPages}
-              className="p-1.5 rounded-lg border border-[#d2d5d8] disabled:opacity-40 hover:bg-[#f1f2f4] transition"
-              aria-label="Next page"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
+        <Pagination
+          page={currentPage}
+          pageSize={PAGE_SIZE}
+          total={filteredRows.length}
+          onPageChange={setPage}
+        />
       </div>
     </div>
   );
