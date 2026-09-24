@@ -34,6 +34,35 @@ app.use((req, res, next) => {
 });
 
 // ----------------------------------------------------
+// PRIVACY POLICY
+// ----------------------------------------------------
+// Public page for the App Store listing's privacy policy URL. The contact
+// address comes from SUPPORT_EMAIL.
+const PRIVACY_FILE = path.join(process.cwd(), "legal", "privacy.html");
+const PRIVACY_EFFECTIVE_DATE = "September 24, 2026";
+
+const escapeHtml = (value: string) =>
+  value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
+app.get("/privacy", async (_req, res) => {
+  try {
+    const email = (process.env.SUPPORT_EMAIL || "").trim();
+    const html = (await fs.readFile(PRIVACY_FILE, "utf8"))
+      .replaceAll("{{EFFECTIVE_DATE}}", PRIVACY_EFFECTIVE_DATE)
+      .replaceAll(
+        '<a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>',
+        email
+          ? `<a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a>`
+          : "<strong>[SUPPORT_EMAIL is not set on the server]</strong>"
+      );
+    res.type("html").send(html);
+  } catch (err) {
+    console.error("Could not serve privacy policy:", err);
+    res.status(500).send("Privacy policy is temporarily unavailable.");
+  }
+});
+
+// ----------------------------------------------------
 // WEBHOOKS
 // ----------------------------------------------------
 // Registered before the JSON body parser: the HMAC check needs the raw body.

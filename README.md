@@ -78,4 +78,5 @@ npm start
 - **Hosting.** Deploy to a host with a stable HTTPS URL. Set `application_url` and `redirect_urls` in `shopify.app.image-alt-fix.toml` to it, then run `shopify app deploy`.
 - **Environment.** Set `SHOPIFY_API_KEY`, `VITE_SHOPIFY_API_KEY` (at build time), `SHOPIFY_API_SECRET`, `SCOPES` and `NODE_ENV=production`.
 - **Persistent storage.** Point `DATABASE_PATH` at a persistent volume. SQLite suits a single server instance. Running several instances needs a shared database such as Postgres behind the same functions in `tokenStore.ts`.
-- **Listing.** Prepare a privacy policy URL, support contact, screenshots and description in the Partner Dashboard.
+- **Privacy policy.** The app serves its privacy policy at `/privacy` on its own domain, for example `https://your-app-host.com/privacy`. Set `SUPPORT_EMAIL` so the page shows your contact address, and update the policy in `legal/privacy.html` if the app starts handling new data.
+- **Listing.** Prepare a support contact, screenshots and description in the Partner Dashboard. The app icon is in `listing/`.
