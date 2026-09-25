@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import app from "./app";
+import app from "./app.js";
 
 // Long-running server for local development (`shopify app dev`) and hosts
 // that run `npm start`. On Vercel, api/index.ts serves the same Express app

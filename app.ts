@@ -2,8 +2,8 @@ import express from "express";
 import path from "path";
 import fs from "fs/promises";
 import dotenv from "dotenv";
-import * as shopify from "./shopify";
-import * as tokenStore from "./tokenStore";
+import * as shopify from "./shopify.js";
+import * as tokenStore from "./tokenStore.js";
 import type { ShopifyProduct, StoreAuditSummary } from "./src/types";
 
 dotenv.config();

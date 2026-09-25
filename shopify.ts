@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import type { ShopifyProduct, ShopifyProductImage, ShopifyProductVariant, ProductJsonLd } from "./src/types";
-import { deleteToken } from "./tokenStore";
+import { deleteToken } from "./tokenStore.js";
 
 const ADMIN_API_VERSION = "2026-10";
 

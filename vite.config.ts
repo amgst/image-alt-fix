@@ -3,6 +3,11 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
 
+// An empty VITE_SHOPIFY_API_KEY in the build environment (for example a blank
+// Vercel variable) would override .env.production and leave App Bridge
+// without a client ID, so drop it and let the file's value apply.
+if (!process.env.VITE_SHOPIFY_API_KEY?.trim()) delete process.env.VITE_SHOPIFY_API_KEY;
+
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
