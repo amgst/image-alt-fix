@@ -73,6 +73,23 @@ npm start
 
 `npm run build` creates the browser assets in `dist/` and the bundled server at `dist/server.cjs`. `npm start` serves the production build on `PORT`, or `3000` if it is not set.
 
+## Deploying on Vercel
+
+The app runs at `https://image-alt-fix.vercel.app`. `vercel.json` builds the page with `vite build` and serves the Express routes in `app.ts` as one function (`api/index.ts`), with `/api/*` and `/privacy` rewritten to it.
+
+Set these environment variables in the Vercel project, for Production:
+
+- `SHOPIFY_API_KEY`: the app's client ID.
+- `SHOPIFY_API_SECRET`: the app's client secret.
+- `SCOPES`: `read_products,write_files`, matching the app config.
+- `SUPPORT_EMAIL`: the contact address shown on `/privacy`.
+
+`VITE_SHOPIFY_API_KEY` is read from the committed `.env.production`, since the client ID is public.
+
+On Vercel, access tokens are cached in SQLite under `/tmp`, which does not persist between function instances. That is safe: a missing token is re-created from the request's session token.
+
+After changing URLs, scopes or webhooks in `shopify.app.image-alt-fix.toml`, run `shopify app deploy` to release a new app version.
+
 ## Before going to production
 
 - **Hosting.** Deploy to a host with a stable HTTPS URL. Set `application_url` and `redirect_urls` in `shopify.app.image-alt-fix.toml` to it, then run `shopify app deploy`.

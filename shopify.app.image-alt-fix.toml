@@ -2,7 +2,7 @@
 
 client_id = "7c3c01f070ba1a78de9671ab45cb8d83"
 name = "Image Alt Fix"
-application_url = "http://localhost:3000"
+application_url = "https://image-alt-fix.vercel.app"
 embedded = true
 
 [webhooks]
@@ -22,7 +22,7 @@ api_version = "2026-10"
 scopes = "read_products,write_files"
 
 [auth]
-redirect_urls = [ "http://localhost:3000/api/auth/callback" ]
+redirect_urls = [ "https://image-alt-fix.vercel.app/api/auth/callback" ]
 
 [build]
 automatically_update_urls_on_dev = true

@@ -15,7 +15,11 @@ export interface StoredToken {
   scope: string;
 }
 
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), "data", "app.sqlite");
+// On Vercel the filesystem is read-only apart from /tmp, which is per-instance
+// and short-lived, so there the database only caches tokens between requests.
+const DB_PATH =
+  process.env.DATABASE_PATH ||
+  (process.env.VERCEL ? "/tmp/app.sqlite" : path.join(process.cwd(), "data", "app.sqlite"));
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 const db = new DatabaseSync(DB_PATH);
