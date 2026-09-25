@@ -123,27 +123,52 @@ function resolveShopForRequest(req: express.Request): { shop: string; idToken: s
   return shop ? { shop, idToken } : null;
 }
 
-// Returns the shop's Admin API access token from the database. When there is
-// none, or it lacks a scope the app now requires, the request's ID token is
-// exchanged for a fresh one, which also covers reinstalls.
+// Refresh this long before Shopify's expiry, so a token never lapses mid-call.
+const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+function storeGrant(shop: string, grant: shopify.OfflineTokenGrant): string {
+  tokenStore.saveToken({ shop, ...grant });
+  if (!tokenStore.hasScopes(grant.scope, SHOPIFY_SCOPES)) {
+    console.warn(
+      `Access token for ${shop} grants "${grant.scope}" but SCOPES requires "${SHOPIFY_SCOPES}". ` +
+        "Make SCOPES match access_scopes in the app config."
+    );
+  }
+  return grant.accessToken;
+}
+
+// Returns a valid Admin API access token for the shop. Uses the stored token
+// while it is fresh, refreshes it with the refresh token when it is close to
+// expiring, and otherwise exchanges the request's ID token for a new pair.
+// Exchange also covers first use, reinstalls and changed scopes.
 async function getAccessToken(shop: string, idToken: string): Promise<string> {
   const stored = tokenStore.getToken(shop);
-  if (stored && tokenStore.hasScopes(stored.scope, SHOPIFY_SCOPES)) return stored.accessToken;
+  const now = Date.now();
 
-  const { accessToken, scope } = await shopify.exchangeIdTokenForAccessToken(
+  if (stored && tokenStore.hasScopes(stored.scope, SHOPIFY_SCOPES)) {
+    if (stored.expiresAt - REFRESH_MARGIN_MS > now) return stored.accessToken;
+    if (stored.refreshToken && stored.refreshExpiresAt > now) {
+      try {
+        const grant = await shopify.refreshAccessToken(
+          shop,
+          stored.refreshToken,
+          SHOPIFY_API_KEY,
+          SHOPIFY_API_SECRET
+        );
+        return storeGrant(shop, grant);
+      } catch (err) {
+        console.warn(`Token refresh failed for ${shop}; exchanging a new token instead.`, err);
+      }
+    }
+  }
+
+  const grant = await shopify.exchangeIdTokenForAccessToken(
     shop,
     idToken,
     SHOPIFY_API_KEY,
     SHOPIFY_API_SECRET
   );
-  tokenStore.saveToken(shop, accessToken, scope);
-  if (!tokenStore.hasScopes(scope, SHOPIFY_SCOPES)) {
-    console.warn(
-      `Access token for ${shop} grants "${scope}" but SCOPES requires "${SHOPIFY_SCOPES}". ` +
-        "Make SCOPES match access_scopes in the app config."
-    );
-  }
-  return accessToken;
+  return storeGrant(shop, grant);
 }
 
 // Runs an Admin API call for the request's shop. If Shopify rejects the
@@ -168,6 +193,12 @@ async function withAdmin<T>(
 
 function sendApiError(res: express.Response, err: unknown, context: string) {
   console.error(`${context}:`, err);
+  if (err instanceof shopify.InvalidSessionTokenError) {
+    // A stale ID token: tell App Bridge to fetch a fresh one and retry.
+    res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
+    res.status(401).json({ error: "invalid_session", message: "Your session expired. Retrying." });
+    return;
+  }
   if (err instanceof shopify.ShopifyAuthError) {
     res.status(401).json({ error: "not_authenticated", message: err.message });
     return;

@@ -23,11 +23,21 @@ async function getIdToken(): Promise<string | null> {
   }
 }
 
-export async function shopifyFetch(input: string, init: RequestInit = {}): Promise<Response> {
+async function send(input: string, init: RequestInit): Promise<Response> {
   const token = await getIdToken();
   const headers = new Headers(init.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return fetch(input, { ...init, headers });
+}
+
+// When the server reports a stale session token (Shopify's retry header on a
+// 401), fetch a fresh token and retry once.
+export async function shopifyFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const res = await send(input, init);
+  if (res.status === 401 && res.headers.get('X-Shopify-Retry-Invalid-Session-Request') === '1') {
+    return send(input, init);
+  }
+  return res;
 }
 
 // Shows an App Bridge toast in the Shopify admin, or logs when App Bridge is

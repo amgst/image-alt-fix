@@ -14,6 +14,11 @@ export interface StoredToken {
   shop: string;
   accessToken: string;
   scope: string;
+  // Epoch milliseconds. Shopify's expiring offline tokens last about an hour;
+  // their refresh tokens about 90 days.
+  expiresAt: number;
+  refreshToken: string;
+  refreshExpiresAt: number;
 }
 
 interface Backend {
@@ -40,30 +45,67 @@ function openSqlite(): Backend {
   const db = new sqlite.DatabaseSync(DB_PATH);
   db.exec(`
     PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS shop_tokens (
-      shop         TEXT PRIMARY KEY,
-      access_token TEXT NOT NULL,
-      scope        TEXT NOT NULL DEFAULT '',
-      updated_at   TEXT NOT NULL
+    -- Earlier versions stored non-expiring tokens, which Shopify no longer accepts.
+    DROP TABLE IF EXISTS shop_tokens;
+    CREATE TABLE IF NOT EXISTS offline_tokens (
+      shop               TEXT PRIMARY KEY,
+      access_token       TEXT NOT NULL,
+      scope              TEXT NOT NULL DEFAULT '',
+      expires_at         INTEGER NOT NULL,
+      refresh_token      TEXT NOT NULL DEFAULT '',
+      refresh_expires_at INTEGER NOT NULL DEFAULT 0,
+      updated_at         TEXT NOT NULL
     );
   `);
-  const select = db.prepare("SELECT shop, access_token, scope FROM shop_tokens WHERE shop = ?");
+  const select = db.prepare(
+    "SELECT shop, access_token, scope, expires_at, refresh_token, refresh_expires_at FROM offline_tokens WHERE shop = ?"
+  );
   const upsert = db.prepare(`
-    INSERT INTO shop_tokens (shop, access_token, scope, updated_at) VALUES (?, ?, ?, ?)
+    INSERT INTO offline_tokens (shop, access_token, scope, expires_at, refresh_token, refresh_expires_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(shop) DO UPDATE SET
       access_token = excluded.access_token,
       scope = excluded.scope,
+      expires_at = excluded.expires_at,
+      refresh_token = excluded.refresh_token,
+      refresh_expires_at = excluded.refresh_expires_at,
       updated_at = excluded.updated_at
   `);
-  const del = db.prepare("DELETE FROM shop_tokens WHERE shop = ?");
+  const del = db.prepare("DELETE FROM offline_tokens WHERE shop = ?");
 
   return {
     get(shop) {
-      const row = select.get(shop) as { shop: string; access_token: string; scope: string } | undefined;
-      return row ? { shop: row.shop, accessToken: row.access_token, scope: row.scope } : null;
+      const row = select.get(shop) as
+        | {
+            shop: string;
+            access_token: string;
+            scope: string;
+            expires_at: number;
+            refresh_token: string;
+            refresh_expires_at: number;
+          }
+        | undefined;
+      return row
+        ? {
+            shop: row.shop,
+            accessToken: row.access_token,
+            scope: row.scope,
+            expiresAt: Number(row.expires_at),
+            refreshToken: row.refresh_token,
+            refreshExpiresAt: Number(row.refresh_expires_at),
+          }
+        : null;
     },
     save(t) {
-      upsert.run(t.shop, t.accessToken, t.scope, new Date().toISOString());
+      upsert.run(
+        t.shop,
+        t.accessToken,
+        t.scope,
+        t.expiresAt,
+        t.refreshToken,
+        t.refreshExpiresAt,
+        new Date().toISOString()
+      );
     },
     remove(shop) {
       del.run(shop);
@@ -93,9 +135,9 @@ export function getToken(shop: string): StoredToken | null {
   return backend.get(shop);
 }
 
-// Inserts or replaces the shop's token, so reinstalls simply overwrite.
-export function saveToken(shop: string, accessToken: string, scope: string): void {
-  backend.save({ shop, accessToken, scope });
+// Inserts or replaces the shop's token pair, so reinstalls simply overwrite.
+export function saveToken(token: StoredToken): void {
+  backend.save(token);
 }
 
 export function deleteToken(shop: string): void {

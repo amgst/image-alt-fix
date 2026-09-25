@@ -14,33 +14,87 @@ export function isValidShopDomain(shop: string): boolean {
   return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
 }
 
-// Exchanges an App Bridge ID token for an offline Admin API access token,
+// An expiring offline token pair, as returned by token exchange and refresh.
+// Shopify requires expiring offline tokens for the Admin API: the access
+// token lasts about an hour and the refresh token about 90 days.
+// https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/offline-access-tokens
+export interface OfflineTokenGrant {
+  accessToken: string;
+  scope: string;
+  expiresAt: number;
+  refreshToken: string;
+  refreshExpiresAt: number;
+}
+
+// Thrown when Shopify rejects the ID token in a token exchange (400), which
+// usually means it was stale. App Bridge fixes that by fetching a new one.
+export class InvalidSessionTokenError extends Error {}
+
+async function requestOfflineToken(shop: string, params: Record<string, string>): Promise<OfflineTokenGrant> {
+  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams(params).toString(),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    const message = `Token request failed: ${res.status} ${text}`;
+    throw params.grant_type === "refresh_token" || res.status !== 400
+      ? new Error(message)
+      : new InvalidSessionTokenError(message);
+  }
+  const data = JSON.parse(text) as {
+    access_token: string;
+    scope?: string;
+    expires_in?: number;
+    refresh_token?: string;
+    refresh_token_expires_in?: number;
+  };
+  const now = Date.now();
+  return {
+    accessToken: data.access_token,
+    scope: data.scope ?? "",
+    expiresAt: now + (data.expires_in ?? 3600) * 1000,
+    refreshToken: data.refresh_token ?? "",
+    refreshExpiresAt: data.refresh_token ? now + (data.refresh_token_expires_in ?? 0) * 1000 : 0,
+  };
+}
+
+// Exchanges an App Bridge ID token for an expiring offline access token,
 // without a merchant redirect. This is how embedded apps using Shopify managed
 // installation authenticate.
 // https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/token-exchange
-export async function exchangeIdTokenForAccessToken(
+export function exchangeIdTokenForAccessToken(
   shop: string,
   idToken: string,
   apiKey: string,
   apiSecret: string
-): Promise<{ accessToken: string; scope: string }> {
-  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: apiKey,
-      client_secret: apiSecret,
-      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-      subject_token: idToken,
-      subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
-      requested_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
-    }),
+): Promise<OfflineTokenGrant> {
+  return requestOfflineToken(shop, {
+    client_id: apiKey,
+    client_secret: apiSecret,
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    subject_token: idToken,
+    subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    requested_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
+    expiring: "1",
   });
-  if (!res.ok) {
-    throw new Error(`Token exchange failed: ${res.status} ${await res.text()}`);
-  }
-  const data = (await res.json()) as { access_token: string; scope?: string };
-  return { accessToken: data.access_token, scope: data.scope ?? "" };
+}
+
+// Uses a refresh token to get a new access token and refresh token. Shopify
+// retires the old refresh token, so the returned pair must be stored.
+export function refreshAccessToken(
+  shop: string,
+  refreshToken: string,
+  apiKey: string,
+  apiSecret: string
+): Promise<OfflineTokenGrant> {
+  return requestOfflineToken(shop, {
+    client_id: apiKey,
+    client_secret: apiSecret,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+  });
 }
 
 function base64UrlDecode(input: string): Buffer {
