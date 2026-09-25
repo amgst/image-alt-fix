@@ -172,9 +172,13 @@ function sendApiError(res: express.Response, err: unknown, context: string) {
     res.status(401).json({ error: "not_authenticated", message: err.message });
     return;
   }
+  // The reason comes from Shopify's response (never from our credentials), so
+  // it is safe to show and makes failures diagnosable without server logs.
+  const detail = err instanceof Error ? err.message.slice(0, 400) : String(err).slice(0, 400);
   res.status(502).json({
     error: "shopify_error",
     message: "Shopify could not complete the request. Please try again.",
+    detail,
   });
 }
 

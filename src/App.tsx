@@ -32,7 +32,7 @@ export interface AltSaveResult {
 async function readError(res: Response): Promise<string> {
   try {
     const body = await res.json();
-    if (body?.message) return body.message;
+    if (body?.message) return body.detail ? `${body.message} (${body.detail})` : body.message;
   } catch {
     // Fall through to the generic message.
   }

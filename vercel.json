@@ -5,12 +5,19 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.ts": {
-      "includeFiles": "{banners.json,docs/index.html}"
+      "includeFiles": "{banners.json,docs/index.html}",
+      "maxDuration": 60
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" },
-    { "source": "/privacy", "destination": "/api/index" }
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/privacy",
+      "destination": "/api/index"
+    }
   ],
   "headers": [
     {
