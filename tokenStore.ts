@@ -23,8 +23,16 @@ export interface StoredToken {
 
 interface Backend {
   get(shop: string): StoredToken | null;
+  getLegacy(shop: string): LegacyToken | null;
   save(token: StoredToken): void;
   remove(shop: string): void;
+  removeLegacy(shop: string): void;
+}
+
+export interface LegacyToken {
+  shop: string;
+  accessToken: string;
+  scope: string;
 }
 
 // On Vercel the filesystem is read-only apart from /tmp, which is per-instance
@@ -45,8 +53,6 @@ function openSqlite(): Backend {
   const db = new sqlite.DatabaseSync(DB_PATH);
   db.exec(`
     PRAGMA journal_mode = WAL;
-    -- Earlier versions stored non-expiring tokens, which Shopify no longer accepts.
-    DROP TABLE IF EXISTS shop_tokens;
     CREATE TABLE IF NOT EXISTS offline_tokens (
       shop               TEXT PRIMARY KEY,
       access_token       TEXT NOT NULL,
@@ -60,6 +66,7 @@ function openSqlite(): Backend {
   const select = db.prepare(
     "SELECT shop, access_token, scope, expires_at, refresh_token, refresh_expires_at FROM offline_tokens WHERE shop = ?"
   );
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?");
   const upsert = db.prepare(`
     INSERT INTO offline_tokens (shop, access_token, scope, expires_at, refresh_token, refresh_expires_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -72,6 +79,39 @@ function openSqlite(): Backend {
       updated_at = excluded.updated_at
   `);
   const del = db.prepare("DELETE FROM offline_tokens WHERE shop = ?");
+  const legacySelectCache = new Map<string, ReturnType<typeof db.prepare> | null>();
+  let legacyShopColumn = "shop";
+
+  function legacySelect(): ReturnType<typeof db.prepare> | null {
+    if (legacySelectCache.has("shop_tokens")) return legacySelectCache.get("shop_tokens") ?? null;
+    if (!tables.get("shop_tokens")) {
+      legacySelectCache.set("shop_tokens", null);
+      return null;
+    }
+
+    const columns = db.prepare("PRAGMA table_info(shop_tokens)").all() as { name: string }[];
+    const names = new Set(columns.map((c) => c.name));
+    const shopColumn = names.has("shop") ? "shop" : names.has("shop_domain") ? "shop_domain" : "";
+    const tokenColumn = names.has("access_token")
+      ? "access_token"
+      : names.has("accessToken")
+        ? "accessToken"
+        : "";
+    const scopeColumn = names.has("scope") ? "scope" : names.has("scopes") ? "scopes" : "";
+    if (!shopColumn || !tokenColumn) {
+      legacySelectCache.set("shop_tokens", null);
+      return null;
+    }
+    legacyShopColumn = shopColumn;
+
+    const stmt = db.prepare(
+      `SELECT ${shopColumn} AS shop, ${tokenColumn} AS access_token, ${
+        scopeColumn ? `${scopeColumn} AS scope` : "'' AS scope"
+      } FROM shop_tokens WHERE ${shopColumn} = ?`
+    );
+    legacySelectCache.set("shop_tokens", stmt);
+    return stmt;
+  }
 
   return {
     get(shop) {
@@ -96,6 +136,16 @@ function openSqlite(): Backend {
           }
         : null;
     },
+    getLegacy(shop) {
+      const stmt = legacySelect();
+      if (!stmt) return null;
+      const row = stmt.get(shop) as
+        | { shop: string; access_token: string; scope: string }
+        | undefined;
+      return row
+        ? { shop: row.shop, accessToken: row.access_token, scope: row.scope || "" }
+        : null;
+    },
     save(t) {
       upsert.run(
         t.shop,
@@ -110,6 +160,9 @@ function openSqlite(): Backend {
     remove(shop) {
       del.run(shop);
     },
+    removeLegacy(shop) {
+      if (legacySelect()) db.prepare(`DELETE FROM shop_tokens WHERE ${legacyShopColumn} = ?`).run(shop);
+    },
   };
 }
 
@@ -117,8 +170,10 @@ function memoryBackend(): Backend {
   const tokens = new Map<string, StoredToken>();
   return {
     get: (shop) => tokens.get(shop) ?? null,
+    getLegacy: () => null,
     save: (t) => void tokens.set(t.shop, t),
     remove: (shop) => void tokens.delete(shop),
+    removeLegacy: () => undefined,
   };
 }
 
@@ -135,6 +190,10 @@ export function getToken(shop: string): StoredToken | null {
   return backend.get(shop);
 }
 
+export function getLegacyToken(shop: string): LegacyToken | null {
+  return backend.getLegacy(shop);
+}
+
 // Inserts or replaces the shop's token pair, so reinstalls simply overwrite.
 export function saveToken(token: StoredToken): void {
   backend.save(token);
@@ -142,6 +201,11 @@ export function saveToken(token: StoredToken): void {
 
 export function deleteToken(shop: string): void {
   backend.remove(shop);
+  backend.removeLegacy(shop);
+}
+
+export function deleteLegacyToken(shop: string): void {
+  backend.removeLegacy(shop);
 }
 
 // True when the granted scopes cover every required one. A write_ scope also

@@ -81,6 +81,26 @@ export function exchangeIdTokenForAccessToken(
   });
 }
 
+// Migrates a legacy non-expiring offline token to an expiring token pair.
+// Use this only for tokens that were previously saved by this app; App Bridge
+// ID tokens use exchangeIdTokenForAccessToken instead.
+export function migrateOfflineAccessToken(
+  shop: string,
+  legacyAccessToken: string,
+  apiKey: string,
+  apiSecret: string
+): Promise<OfflineTokenGrant> {
+  return requestOfflineToken(shop, {
+    client_id: apiKey,
+    client_secret: apiSecret,
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    subject_token: legacyAccessToken,
+    subject_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
+    requested_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
+    expiring: "1",
+  });
+}
+
 // Uses a refresh token to get a new access token and refresh token. Shopify
 // retires the old refresh token, so the returned pair must be stored.
 export function refreshAccessToken(

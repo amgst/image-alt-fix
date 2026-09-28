@@ -162,6 +162,18 @@ async function getAccessToken(shop: string, idToken: string): Promise<string> {
     }
   }
 
+  const legacy = tokenStore.getLegacyToken(shop);
+  if (legacy && tokenStore.hasScopes(legacy.scope, SHOPIFY_SCOPES)) {
+    const grant = await shopify.migrateOfflineAccessToken(
+      shop,
+      legacy.accessToken,
+      SHOPIFY_API_KEY,
+      SHOPIFY_API_SECRET
+    );
+    tokenStore.deleteLegacyToken(shop);
+    return storeGrant(shop, grant);
+  }
+
   const grant = await shopify.exchangeIdTokenForAccessToken(
     shop,
     idToken,
